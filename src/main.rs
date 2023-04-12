@@ -1,6 +1,6 @@
 use std::{thread, time::Duration};
 
-use chess_rusted::{Board, ErrorID, MoveError, GameStatus};
+use chess_example::{Board, ErrorID, MoveError, GameStatus};
 
 fn main() {
     let mut board = Board::new();
