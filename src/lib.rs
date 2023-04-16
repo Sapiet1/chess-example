@@ -93,8 +93,6 @@ enum BoardState {
     },
 }
 
-// This doesn't really need PartialEq, Eq, and Hash.
-// We're only hashing the board (type Board).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TestState {
     WithCheck,

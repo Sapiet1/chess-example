@@ -49,12 +49,6 @@ impl Move for King {
             if let Square::Busy(piece) = square {
                 let opposite_color = chessboard.turn.opposite();
                 if piece.color == opposite_color {
-                    // If you're wondering, the behavior of this changes
-                    // depending on the state of the board itself. I mean, 
-                    // whethering or not you're going to check for checks
-                    // and if it's a real move in general. Promotions are going
-                    // to be moved to the end of the move activating only
-                    // to the board that has a state of BoardState::Actual.
                     return chessboard.write_andor_check(position_start, position_end, MoveDetails::Take)
                 } else {
                     Err(Box::new(MoveError::Take))
@@ -160,12 +154,6 @@ impl Move for Queen {
         let position_one_diff = position_start[0] as i16 - position_end[0] as i16;
         let position_two_diff = position_start[1] as i16 - position_end[1] as i16;
 
-        // Moves are not what the piece itself can do, but what we suggest it
-        // to do. Thus, we can just reuse the Rook and Bishop functions.
-        // It should be noted that the conditionals are still noted, because
-        // if it fails them when passed into the other functions, we return 
-        // the value when it fails the conditionals in those functions even when it's valid
-        // (a Rook cannot move like a Bishop and vice versa).
         if [position_one_diff, position_two_diff].contains(&0) && position_one_diff != position_two_diff {
             return Rook::do_move(chessboard, position_start, position_end, _has_moved)
         } else if position_one_diff.abs() - position_two_diff.abs() == 0 && (position_one_diff, position_two_diff) != (0, 0) {
