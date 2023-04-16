@@ -80,7 +80,7 @@ impl Move for King {
             // there are multiple squares we need to check, not just one. 
             // It's more simple. This also checks for path obstructions.
             for (row, column) in rows.into_iter().zip(columns.into_iter()) {
-                // Let's use easier constructs for things like this:
+                // May use PiecesList for above. TO-DO.
                 if let Square::Busy(_) = chessboard.board[row][column] {
                     return Err(Box::new(MoveError::Path))
                 }
@@ -125,7 +125,6 @@ impl Move for King {
 
             // Since it writes twice:
             if chessboard.board_state == BoardState::Actual {
-                // Something is wrong. Check lib for check_over and check_checks.
                 *FIFTY_MOVE_RULE.lock().unwrap() -= 1;
 
                 // We want to remove the second last one as castling takes 
