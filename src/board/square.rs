@@ -1,5 +1,4 @@
-pub mod movable;
-use movable::PieceType;
+use super::movable::PieceType;
 
 use std::process; 
 
@@ -44,7 +43,6 @@ pub struct Piece {
     pub color: Color,
     pub has_moved: bool,
     pub piece_type: PieceType,
-    pub check_dummy: bool,
 }
 
 // The Square. It has three variants,
@@ -59,7 +57,7 @@ pub enum Square {
 
 impl Square {
     // We can create a new Square::Busy(piece) with this function:
-    pub fn new_piece(color: char, piece_type: &str, check_dummy: bool) -> Self {
+    pub fn new_piece(color: char, piece_type: &str) -> Self {
         let color = match color.to_ascii_lowercase() {
             'w' => Color::White,
             'b' => Color::Black,
@@ -76,11 +74,12 @@ impl Square {
             _ => process::exit(1),
         };
         
-        Square::Busy(Piece { color, has_moved, piece_type, check_dummy })
+        Square::Busy(Piece { color, has_moved, piece_type })
     }
 
     // Here, we set the piece to has_moved if it is one.
     // Otherwise, we exit the program entirely.
+    // As you can do square.get_mut().has_moved = true, this is DEPRECATED:
     pub fn set_moved(&mut self) {
         let Square::Busy(piece) = self else {
             process::exit(1)
@@ -88,4 +87,23 @@ impl Square {
 
         if !piece.has_moved { piece.has_moved = true; };
     }
+
+    pub fn get(&self) -> &Piece {
+        let Square::Busy(piece) = self else {
+            eprintln!("square was not a piece");
+            process::exit(1)
+        };
+
+        piece
+    }
+
+    pub fn get_mut(&mut self) -> &mut Piece {
+        let Square::Busy(piece) = self else {
+            eprintln!("square was not a piece");
+            process::exit(1);
+        };
+
+        piece
+    }
 }
+

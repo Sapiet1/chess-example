@@ -1,18 +1,54 @@
-// This file creates a multi-threaded iterator
-// for Board. We defined several iterators,
+// This file creates a board type and implements a 
+// multi-threaded iterator for it. We defined several iterators,
 // one for taking the values itself (into_par_iter),
 // a reference to the values (par_iter),
 // and a mutable reference to the values (par_iter_mut).
 
+use std::ops::{Index, IndexMut};
 use rayon::prelude::*;
 use rayon::iter::plumbing;
 
-use crate::{Square, Board};
+pub mod square;
+pub mod movable;
+
+use square::Square;
+
+pub const BOARD_DIMENSION: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Board {
+    board: [[Square; BOARD_DIMENSION]; BOARD_DIMENSION],
+}
+
+impl Index<usize> for Board {
+    type Output = [Square; BOARD_DIMENSION];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.board[index]
+    }
+}
+
+impl IndexMut<usize> for Board {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.board[index]
+    }
+}
+
+impl<T> From<T> for Board
+where T: TryInto<[[Square; BOARD_DIMENSION]; BOARD_DIMENSION]>,
+      <T as TryInto<[[Square; 8]; 8]>>::Error: std::fmt::Debug,
+{
+    fn from(value: T) -> Self {
+        let board: [[Square; BOARD_DIMENSION]; BOARD_DIMENSION] = value.try_into().unwrap();
+
+        Board { board }
+    }
+}
 
 // The pattern is copied after the first.
 // This is where the iterator that Board uses is defined:
 pub struct BoardIter {
-    map: Vec<Square>,
+    board: Vec<Square>,
 }
 // The iterator struct is a ParallelIterator, as Rayon calls it:
 impl ParallelIterator for BoardIter {
@@ -40,7 +76,7 @@ impl IndexedParallelIterator for BoardIter {
     }
 
     fn len(&self) -> usize {
-        self.map.len()
+        self.board.len()
     }
 }
 // We need a producer of the squares. BoardIter
@@ -50,16 +86,16 @@ impl plumbing::Producer for BoardIter {
     type IntoIter = <Vec<Square> as IntoIterator>::IntoIter; 
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.into_iter()
+        self.board.into_iter()
     }
 
     fn split_at(mut self, index: usize) -> (Self, Self) {
-        let right = self.map.split_off(index);
-        let left = self.map;
+        let right = self.board.split_off(index);
+        let left = self.board;
 
         ( 
-            BoardIter { map: left },
-            BoardIter { map: right },
+            BoardIter { board: left },
+            BoardIter { board: right },
         )
     }
 }
@@ -70,14 +106,14 @@ impl IntoParallelIterator for Board {
     type Item = Square;
 
     fn into_par_iter(self) -> Self::Iter {
-        let map = self.map.into_iter().flatten().collect::<Vec<_>>();
+        let board = self.board.into_iter().flatten().collect::<Vec<_>>();
 
-        BoardIter { map } 
+        BoardIter { board } 
     }
 }
 
 pub struct BoardRefIter<'a> {
-    map: Vec<&'a Square>
+    board: Vec<&'a Square>
 }
 impl<'a> ParallelIterator for BoardRefIter<'a> {
     type Item = &'a Square;
@@ -103,7 +139,7 @@ impl<'a> IndexedParallelIterator for BoardRefIter<'a> {
     }
 
     fn len(&self) -> usize {
-        self.map.len()
+        self.board.len()
     }
 }
 impl<'a> plumbing::Producer for BoardRefIter<'a> {
@@ -111,16 +147,16 @@ impl<'a> plumbing::Producer for BoardRefIter<'a> {
     type IntoIter = <Vec<&'a Square> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.into_iter()
+        self.board.into_iter()
     }
 
     fn split_at(mut self, index: usize) -> (Self, Self) {
-        let right = self.map.split_off(index);
-        let left = self.map;
+        let right = self.board.split_off(index);
+        let left = self.board;
 
         ( 
-            BoardRefIter { map: left },
-            BoardRefIter { map: right },
+            BoardRefIter { board: left },
+            BoardRefIter { board: right },
         )
     }
 }
@@ -129,14 +165,14 @@ impl<'a> IntoParallelIterator for &'a Board {
     type Item = &'a Square;
 
     fn into_par_iter(self) -> Self::Iter {
-        let map = self.map.iter().flatten().collect::<Vec<_>>();
+        let board = self.board.iter().flatten().collect::<Vec<_>>();
 
-        BoardRefIter { map }
+        BoardRefIter { board }
     }
 }
 
 pub struct BoardRefMutIter<'a> {
-    map: Vec<&'a mut Square>,
+    board: Vec<&'a mut Square>,
 }
 impl<'a> ParallelIterator for BoardRefMutIter<'a> {
     type Item = &'a mut Square;
@@ -162,7 +198,7 @@ impl<'a> IndexedParallelIterator for BoardRefMutIter<'a> {
     }
 
     fn len(&self) -> usize {
-        self.map.len()
+        self.board.len()
     }
 }
 impl<'a> plumbing::Producer for BoardRefMutIter<'a> {
@@ -170,16 +206,16 @@ impl<'a> plumbing::Producer for BoardRefMutIter<'a> {
     type IntoIter = <Vec<&'a mut Square> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.into_iter()
+        self.board.into_iter()
     }
 
     fn split_at(mut self, index: usize) -> (Self, Self) {
-        let right = self.map.split_off(index);
-        let left = self.map;
+        let right = self.board.split_off(index);
+        let left = self.board;
 
         ( 
-            BoardRefMutIter { map: left },
-            BoardRefMutIter { map: right },
+            BoardRefMutIter { board: left },
+            BoardRefMutIter { board: right },
         )
     }
 }
@@ -188,8 +224,8 @@ impl<'a> IntoParallelIterator for &'a mut Board {
     type Item = &'a mut Square;
 
     fn into_par_iter(self) -> Self::Iter {
-        let map = self.map.iter_mut().flatten().collect::<Vec<_>>();
+        let board = self.board.iter_mut().flatten().collect::<Vec<_>>();
 
-        BoardRefMutIter { map }
+        BoardRefMutIter { board }
     } 
 }

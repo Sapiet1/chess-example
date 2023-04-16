@@ -1,13 +1,13 @@
 use std::{thread, time::Duration};
 
-use chess_example::{Board, ErrorID, MoveError, GameStatus};
+use chess_example::{ChessBoard, ErrorID, MoveError, GameStatus};
 
 fn main() {
-    let mut board = Board::new();
+    let mut chessboard = ChessBoard::new();
 
     loop {
-        println!("{}", board);
-        let result = board.try_move().unwrap_or_else(|err| {
+        println!("{}", chessboard);
+        let result = chessboard.try_move().unwrap_or_else(|err| {
             if let ErrorID::Move(MoveError::Syntax) = err.id() {
                 println!("Type \"help\" for the input syntax and \"quit\" to exit.");
             } else {
@@ -25,7 +25,7 @@ fn main() {
             },
             GameStatus::Quit => break,
             GameStatus::End(_) | GameStatus::Stalemate => {
-                println!("{}\n{}", board, result);
+                println!("{}\n{}", chessboard, result);
                 break;
             },
             _ => (),

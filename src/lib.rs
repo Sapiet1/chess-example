@@ -4,21 +4,17 @@ use rayon::prelude::*;
 // A Lazy cell for global static:
 use once_cell::sync::Lazy;
 
-mod board_iter;
 mod errors;
 use errors::{CheckError, BoardError};
 pub use errors::{ErrorID, MoveError};
-mod square;
-use square::{Square, Color};
-use square::movable::{MoveDetails, PieceType};
+mod board;
+use board::{Board, BOARD_DIMENSION};
+use board::square::{Square, Color, Piece};
+use board::movable::{MoveDetails, PieceType};
 
-// The length and height of the board (8*8):
-const BOARD_DIMENSION: usize = 8;
 // The fifty move rule states that if there's no 
 // captures or pawn moves in fifty moves, 
-// the game will be a draw. More importantly, 
-// it means that those positions that are stalemate 
-// but impossibly hard to detect can be dealt with.
+// the game will be a draw.  
 static FIFTY_MOVE_RULE: Lazy<Mutex<u8>> = Lazy::new(|| Mutex::new(0));
 const FIFTY_MOVES: u8 = 50;
 // If the board repeats thrice, it's a draw. 
@@ -28,24 +24,110 @@ const FIFTY_MOVES: u8 = 50;
 static THREE_REPEATS_RULE: Lazy<Mutex<Vec<Board>>> = Lazy::new(|| Mutex::new(Vec::new()));
 const THREE_REPEATS: usize = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Board {
-    color: Color,
-    map: [[Square; BOARD_DIMENSION]; BOARD_DIMENSION],
+#[derive(Copy, Clone)]
+pub struct ChessBoard {
+    board: Board,
+    turn: Color,
+    board_state: BoardState,
 }
 
-impl Board {
-    // This is largely just creating a chess board with
-    // iterators. It is ignorable.
+// Complementary to chessboard.
+struct PiecesList {
+    white_pieces: Vec<(Piece, [usize; 2])>,
+    black_pieces: Vec<(Piece, [usize; 2])>,
+}
+
+impl PiecesList {
+    fn new() -> Self {
+        let white_pieces = Vec::new();
+        let black_pieces = Vec::new();
+        
+        PiecesList { white_pieces, black_pieces }
+    }
+    
+    fn get_mut(&mut self, color: Color) -> &mut Vec<(Piece, [usize; 2])> {
+        match color {
+            Color::White => &mut self.white_pieces,
+            Color::Black => &mut self.black_pieces,
+        }
+    }
+
+    fn get(&self, color: Color) -> &Vec<(Piece, [usize; 2])> {
+        match color {
+            Color::White => &self.white_pieces,
+            Color::Black => &self.black_pieces,
+        }
+    }
+
+    fn from_board(board: &Board) -> Self {
+        let pieces = board.par_iter().enumerate().fold(|| PiecesList::new(), |mut pieces, (index, square)| {
+            let &Square::Busy(piece) = square else {
+                return pieces
+            };
+
+            let row = index / BOARD_DIMENSION;
+            let column = index % BOARD_DIMENSION;
+
+            pieces.get_mut(piece.color).push((piece, [row, column]));
+
+            pieces
+        })
+        .reduce(|| PiecesList::new(), |mut pieces_out, pieces| {
+            pieces_out.white_pieces.extend(pieces.white_pieces);
+            pieces_out.black_pieces.extend(pieces.black_pieces);
+
+            pieces_out
+        });
+
+
+        pieces
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BoardState {
+    Actual,
+    Test {
+        test_state: TestState,
+        previous_board: Board,
+    },
+}
+
+// This doesn't really need PartialEq, Eq, and Hash.
+// We're only hashing the board (type Board).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TestState {
+    WithCheck,
+    WithoutCheck,
+}
+
+impl ChessBoard {
+    fn to_board_state_actual(&mut self) {
+        let BoardState::Test { previous_board: board, .. } = self.board_state else {
+            // Already Actual:
+            return
+        };
+
+        self.board = board;
+        self.board_state = BoardState::Actual;
+
+    }
+
+    fn to_board_state_test(&mut self, test_state: TestState) {
+        let previous_board = self.board;
+        self.board_state = BoardState::Test { test_state, previous_board };
+    }
+
+    // Creating a new chess board:
     pub fn new() -> Self {
         let white_frontrow: Vec<[Square; BOARD_DIMENSION]> = iter::once({
-            iter::repeat(Square::new_piece('w', "p", false))
+            iter::repeat(Square::new_piece('w', "p"))
                 .take(BOARD_DIMENSION).collect::<Vec<_>>()
                 .try_into().unwrap()
         })
         .collect();
         let black_frontrow: Vec<[Square; BOARD_DIMENSION]> = iter::once({
-            iter::repeat(Square::new_piece('b', "p", false))
+            iter::repeat(Square::new_piece('b', "p"))
                 .take(BOARD_DIMENSION).collect::<Vec<_>>()
                 .try_into().unwrap()
         })
@@ -57,8 +139,11 @@ impl Board {
             let mut piece_order_clone = piece_order.clone();
 
             iter::from_fn(|| {
-                if let Some(piece_type) = piece_order_clone.next() { Some(Square::new_piece('w', &piece_type.to_string(), false)) } 
-                else { None }
+                if let Some(piece_type) = piece_order_clone.next() { 
+                    Some(Square::new_piece('w', &piece_type.to_string())) 
+                } else { 
+                    None 
+                }
             })
             .collect::<Vec<_>>()
             .try_into().unwrap()
@@ -66,8 +151,11 @@ impl Board {
         .collect();
         let black_backrow: Vec<[Square; BOARD_DIMENSION]> = iter::once({
             iter::from_fn(|| {
-                if let Some(piece_type) = piece_order.next() { Some(Square::new_piece('b', &piece_type.to_string(), false)) } 
-                else { None }
+                if let Some(piece_type) = piece_order.next() { 
+                    Some(Square::new_piece('b', &piece_type.to_string())) 
+                } else { 
+                    None 
+                }
             })
             .collect::<Vec<_>>()
             .try_into().unwrap()
@@ -82,19 +170,19 @@ impl Board {
         .take(4)
         .collect();
 
-        let map: [[Square; BOARD_DIMENSION]; BOARD_DIMENSION] = [black_backrow, black_frontrow, empty_rows, white_frontrow, white_backrow]
+        let board: Board = [black_backrow, black_frontrow, empty_rows, white_frontrow, white_backrow]
             .into_par_iter()
             .flatten()
             .collect::<Vec<_>>()
             .try_into().unwrap();
-
-        // White goes first:
-        let color = Color::White;
-
-        let board = Board { color, map };
         THREE_REPEATS_RULE.lock().unwrap().push(board);
 
-        board
+        // White goes first:
+        let turn = Color::White;
+        // First move, so:
+        let board_state = BoardState::Actual; 
+
+        ChessBoard { board, turn, board_state }
     }
 
     // Getting input from the user and
@@ -161,80 +249,61 @@ impl Board {
         Ok(self.end_move())
     }
 
+    // Should pieces be put here? Or should I move this over?
     fn do_move(&mut self, position_start: [usize; 2], position_end: [usize; 2]) -> Result<(), Box<dyn BoardError>> {
-        let square = &self.map[position_start[0]][position_start[1]];
+        let square = &self.board[position_start[0]][position_start[1]];
         // The square has to be a piece for it to be moved.
         let Square::Busy(piece) = square else {
             return Err(Box::new(MoveError::Square))
         };
         // The piece has to have the same color as whose
         // turn the board says it is.
-        if piece.color != self.color { return Err(Box::new(MoveError::Color)) }
+        if piece.color != self.turn { return Err(Box::new(MoveError::Color)) }
 
         // Appeases the borrow checker for PieceType implements copy.
         let piece_type = piece.piece_type;
         // The result of do_move for PieceType is an enum with fields
         // Move and Take, and are not to be used unless
         // checking for checks. Thus, you can throw it away.
-        let _ = piece_type.do_move(self, position_start, position_end, piece.has_moved, true, true, true)?;
+        let _ = piece_type.do_move(self, position_start, position_end, piece.has_moved)?;
 
         Ok(())
     }
 
     fn check_checks(&mut self, king_position: Option<[usize; 2]>) -> Result<(), Box<dyn BoardError>> {
-        // With how checking for checks is implemented 
-        // (sees if the opponent can capture your king on
-        // the next turn), sometimes you need a dummy king. 
-        let mut has_check_dummy = false;
+        // Switching the states
+        self.to_board_state_test(TestState::WithoutCheck);
 
         let king_position = {
             if let Some(position) = king_position {
-                // The dummy king is constructed, thus
-                // this becomes true.
-                has_check_dummy = true;
-
-                self.map[position[0]][position[1]] = Square::new_piece(self.color.to_char(), "k", true);
+                // Creating a dummy king...
+                self.board[position[0]][position[1]] = Square::new_piece(self.turn.to_char(), "k");
                 position
             } else {
                 // If no dummy king is constructed, we simply
                 // find it.
-                let oned_arr = self.par_iter().position_any(|square| {
-                    if let Square::Busy(piece) = square {
-                        piece.color == self.color && piece.piece_type == PieceType::King
-                    } else {
-                        false
-                    }
+                let &(_, position) = PiecesList::from_board(&self.board).get(self.turn).par_iter().find_any(|(piece, _)| {
+                    piece.piece_type == PieceType::King
                 })
                 .unwrap();
 
-                let row = oned_arr / BOARD_DIMENSION;
-                let column = oned_arr % BOARD_DIMENSION;
-
-                [row, column]
+                position
             }
         };
 
         // The return value is stored here:
         let mut out: Result<(), Box<dyn BoardError>> = Ok(());
-        if let Err(check_error) = self.par_iter().enumerate().try_for_each(|(index, square)| {
-            if let Square::Busy(piece) = square {
-                if piece.color != self.color.opposite() { return Ok(()) }
-
-                let row = index / BOARD_DIMENSION;
-                let column = index % BOARD_DIMENSION;
-                let piece_position = [row, column];
-
-                let mut board = *self;
-                board.color = self.color.opposite();
-                if let Ok(MoveDetails::Take) = piece.piece_type
-                    .do_move(&mut board, piece_position, king_position, piece.has_moved, false, false, false) 
-                {
-                    return Err(Box::new(CheckError::error()))
-                }
+        if let Err(check_error) = PiecesList::from_board(&self.board).get(self.turn.opposite()).par_iter().try_for_each(|(piece, position)| {
+            let mut board = *self;
+            board.turn = self.turn.opposite();
+            if let Ok(MoveDetails::Take) = piece.piece_type
+                .do_move(&mut board, *position, king_position, piece.has_moved) 
+            {
+                return Err(Box::new(CheckError::error()))
             }
 
             Ok(())
-        }) 
+        })
         {
             // Basically, checks for if you can capture
             // the dummy value or the king. If you can,
@@ -242,22 +311,7 @@ impl Board {
             out = Err(check_error);
         }
 
-        // If there was a dummy, we find it
-        // and remove it from the field.
-        // We trust that the original square was empty.
-        if has_check_dummy {
-            self.par_iter_mut().try_for_each(|square| {
-                if let Square::Busy(piece) = square {
-                    if piece.check_dummy { 
-                        *square = Square::Empty;
-                        return None
-                    }
-                }
-
-                Some(())
-            }); 
-        }
-
+        self.to_board_state_actual();
         out
 
     }
@@ -271,67 +325,48 @@ impl Board {
         &mut self, 
         position_start: [usize; 2], 
         position_end: [usize; 2],
-        check_checks: bool,
-        check_promotion: bool,
         move_details: MoveDetails,
     ) -> Result<MoveDetails, Box<dyn BoardError>> 
     {
-        let our_piece_original = mem::take(&mut self.map[position_start[0]][position_start[1]]);
+        let our_piece_original = mem::take(&mut self.board[position_start[0]][position_start[1]]);
         let mut our_piece = our_piece_original;
-
+        // Promotion will be handled at the end of the turn
+        // when board_state is BoardState::Actual.
+        let their_piece = mem::take(&mut self.board[position_end[0]][position_end[1]]);
         our_piece.set_moved();
-        if check_promotion {
-            let input = take_input(
-                Some(
-                        "The pawn is being promoted to...\n\
-                         Choose:\n\
-                         [Q]ueen\n\
-                         [R]ook\n\
-                         [B]ishop\n\
-                         [K][N]ight\n"
-                    ),
-                true,
-            );
 
-            let possible_pieces = ["q", "r", "b", "k", "n"];
-            if possible_pieces.contains(&input.as_ref()) {
-                // We can "guarantee" that the piece is indeed a pawn
-                // with the do_move function in the trait Move. 
-                let Square::Busy(piece) = &mut our_piece else {
-                    process::exit(1)
-                };
+        self.board[position_end[0]][position_end[1]] = our_piece;
 
-                piece.piece_type = match input.as_ref() {
-                    "q" => PieceType::Queen,
-                    "r" => PieceType::Rook,
-                    "b" => PieceType::Bishop,
-                    "k" | "n" => PieceType::Knight,
-                    _ => process::exit(1)
-                };
-            } else {
-                self.map[position_start[0]][position_start[1]] = our_piece_original;
-                return Err(Box::new(MoveError::Syntax))
+        match self.board_state {
+            BoardState::Test { test_state: TestState::WithoutCheck, .. } => (),
+            _ => {
+                if let Err(check_error) = self.check_checks(None) {
+                    self.board[position_start[0]][position_start[1]] = our_piece_original;
+                    self.board[position_end[0]][position_end[1]] = their_piece;
+
+                    return Err(check_error)
+                }
             }
         }
 
-        let their_piece = mem::take(&mut self.map[position_end[0]][position_end[1]]);
-        self.map[position_end[0]][position_end[1]] = our_piece;
-        if check_checks {
-            if let Err(check_error) = self.check_checks(None) {
-                self.map[position_start[0]][position_start[1]] = our_piece_original;
-                self.map[position_end[0]][position_end[1]] = their_piece;
+        match move_details {
+            MoveDetails::Move if our_piece.get().piece_type != PieceType::Pawn => {
+                *FIFTY_MOVE_RULE.lock().unwrap() += 1;
+                THREE_REPEATS_RULE.lock().unwrap().push(self.board);
+            },
+            _ => {
+                *FIFTY_MOVE_RULE.lock().unwrap() = 0;
+                THREE_REPEATS_RULE.lock().unwrap().clear();
+            }
+        }
 
-                return Err(check_error)
-            };
-        } 
-        
         Ok(move_details)
     }
 
     // Things to do at the end of the move:
     fn end_move(&mut self) -> GameStatus {
         // Cleaning for EnPassant squares:
-        self.par_iter_mut().for_each(|square| {
+        self.board.par_iter_mut().for_each(|square| {
             if let Square::EnPassant(num) = square {
                 if { *num += 1; *num } == 2 {
                     *square = Square::Empty
@@ -342,39 +377,28 @@ impl Board {
         // Checking for if there's stalemate or checkmate:
         let result = self.check_over();
         // Switching the board's color.
-        self.color = self.color.opposite();
+        self.turn = self.turn.opposite();
 
         result
     }
 
     // This checks for stalemates and checkmates.
-    fn check_over(&self) -> GameStatus {
+    fn check_over(&mut self) -> GameStatus {
         // We want the opposite color to check if they are able to move
         // after our move.
-        let opposite_color = self.color.opposite();
-        let (count, all_moves) = self.par_iter().enumerate().filter_map(|(index, square)| { 
-            if let Square::Busy(piece) = square {
-                // We can ignore pieces not of the opposite color.
-                if piece.color != opposite_color {
-                    return None
-                }
-
-                let row = index / BOARD_DIMENSION;
-                let column = index % BOARD_DIMENSION;
-
-                // Otherwise, we want the piece and its location.
-                return Some(([row, column], piece))
-            }
-
-            None
-        })
+        let opposite_color = self.turn.opposite();
+        // The state of the board.
+        self.to_board_state_test(TestState::WithCheck);
+        
+        let (all_moves, count) = PiecesList::from_board(&self.board).get(opposite_color).par_iter()
         // Then collecting all of the results from the test moves
         // of every square on the board for each piece. At most, 
         // it's 16*64, which is only 1024. This program is
         // multi-threaded, which may help slowdowns.
-        .fold(|| ([0; 2], Vec::new()), |(mut count, mut collector), (position_start, piece)| {
+        .fold(|| (Vec::new(), [0; 2]), |(mut collector, mut count), (piece, position_start)| {
             // Counter for the king, bishop, and knights. If it's two,
             // then it's a draw.
+            // Move this somewhere else please:
             match (piece.color, piece.piece_type) {
                 (Color::White, PieceType::King | PieceType::Bishop | PieceType::Knight) => count[0] += 1,
                 (Color::Black, PieceType::King | PieceType::Bishop | PieceType::Knight) => count[1] += 1,
@@ -390,25 +414,28 @@ impl Board {
                 let position_end = [row, column];
 
                 let mut board = *self;
-                board.color = opposite_color;
+                board.turn = opposite_color;
 
                 collector.push(
-                    piece.piece_type.do_move(&mut board, position_start, position_end, piece.has_moved, true, false, false)
+                    piece.piece_type.do_move(&mut board, *position_start, position_end, piece.has_moved)
                 );
             }
 
-            (count, collector)
+            (collector, count)
         })
         // We have to return the result with .reduce(), which is
         // unlike the stdlib iters in Rust.
-        .reduce(|| ([0; 2], Vec::new()), |(mut out_count, mut out_collector), (count, collector)| {
-            out_collector.extend(collector);
-            out_count.iter_mut().zip(count.into_iter()).for_each(|(x, y)| {
+        .reduce(|| (Vec::new(), [0; 2]), |(mut collector_out, mut count_out), (collector, count)| {
+            collector_out.extend(collector);
+            count_out.iter_mut().zip(count.into_iter()).for_each(|(x, y)| {
                 *x += y;       
             });
 
-            (out_count, out_collector)
+            (collector_out, count_out)
         });
+
+        // Returning the BoardState:
+        self.to_board_state_actual();
 
         // We check for if there's stalemate or checkmate:
         let is_game_over = all_moves.par_iter().all(|result| {
@@ -441,7 +468,7 @@ impl Board {
         // it's stalemate. 
         if is_game_over && has_check_error {
             // We return the color of the winner.
-            GameStatus::End(self.color)
+            GameStatus::End(self.turn)
         } else if is_game_over || *FIFTY_MOVE_RULE.lock().unwrap() == FIFTY_MOVES || repeat_count == THREE_REPEATS || impossible_to_win {
             // Fifty move rule and three repitition is also considered draw.
             GameStatus::Stalemate
@@ -452,14 +479,14 @@ impl Board {
 }
 
 // Giving Board a way to be printed:
-impl fmt::Display for Board {
+impl fmt::Display for ChessBoard {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let board_str = format!("_________________________________________________________\n\
                                           |      |      |      |      |      |      |      |      |\
                                           \n{}\n\
                                           |______|______|______|______|______|______|______|______|", 
             // We collect each piece into a string here:
-            self.par_iter().enumerate().fold(|| String::new(), |collector, (index, square)| {
+            self.board.par_iter().enumerate().fold(|| String::new(), |collector, (index, square)| {
                 let piece_str = {
                     if let Square::Busy(piece) = square {
                         let color = piece.color.to_char().to_string();

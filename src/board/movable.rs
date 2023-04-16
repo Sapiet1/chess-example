@@ -1,7 +1,11 @@
 use std::{iter, mem};
+use rayon::prelude::*;
 
-use crate::{Board, BOARD_DIMENSION, FIFTY_MOVE_RULE, THREE_REPEATS_RULE};
-use crate::square::{Square, Color};
+use crate::{ChessBoard, FIFTY_MOVE_RULE, THREE_REPEATS_RULE, TestState, BoardState, PiecesList};
+use super::{
+    BOARD_DIMENSION,
+    square::{Square, Color},
+};
 use crate::errors::{MoveError, BoardError};
 
 struct King;
@@ -13,27 +17,19 @@ struct Pawn;
 
 trait Move {
     fn do_move(
-        board: &mut Board, 
+        chessboard: &mut ChessBoard,
         position_start: [usize; 2], 
         position_end: [usize; 2],
         has_moved: bool,
-        check_checks: bool,
-        // Checking for promotions is just to be utilized
-        // by the pawn when it is promoting.
-        check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>;
 }
 
 impl Move for King {
     fn do_move(    
-        board: &mut Board, 
+        chessboard: &mut ChessBoard,
         position_start: [usize; 2], 
         position_end: [usize; 2],
         has_moved: bool,
-        check_checks: bool,
-        _check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>
     {
         // We can guarantee the square is, in fact, a King and of the correct color
@@ -47,30 +43,24 @@ impl Move for King {
         if position_one_diff.abs() <= 1 && position_two_diff.abs() <= 1 
         && position_start.iter().zip(position_end.iter()).any(|(a, b)| a != b)
         {
-            let square: &Square = &board.map[position_end[0]][position_end[1]];
+            let square: &Square = &chessboard.board[position_end[0]][position_end[1]];
             // If the square dictated by the position_end argument has a piece in it,
             // we need to check if it's of the opposite color. 
             if let Square::Busy(piece) = square {
-                let opposite_color = board.color.opposite();
+                let opposite_color = chessboard.turn.opposite();
                 if piece.color == opposite_color {
-                    let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Take)?;
-                    if is_actual_move {
-                        *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                        THREE_REPEATS_RULE.lock().unwrap().clear();
-                    }
-
-                    Ok(ok)
+                    // If you're wondering, the behavior of this changes
+                    // depending on the state of the board itself. I mean, 
+                    // whethering or not you're going to check for checks
+                    // and if it's a real move in general. Promotions are going
+                    // to be moved to the end of the move activating only
+                    // to the board that has a state of BoardState::Actual.
+                    return chessboard.write_andor_check(position_start, position_end, MoveDetails::Take)
                 } else {
                     Err(Box::new(MoveError::Take))
                 }
             } else {
-                let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Move)?;
-                if is_actual_move {
-                    *FIFTY_MOVE_RULE.lock().unwrap() += 1;
-                    THREE_REPEATS_RULE.lock().unwrap().push(*board);
-                }
-
-                Ok(ok)
+                return chessboard.write_andor_check(position_start, position_end, MoveDetails::Move)
             }
         // Castling requires the King hasn't moved:
         } else if position_two_diff.abs() == 2 && position_one_diff == 0 && !has_moved {
@@ -96,10 +86,14 @@ impl Move for King {
             // there are multiple squares we need to check, not just one. 
             // It's more simple. This also checks for path obstructions.
             for (row, column) in rows.into_iter().zip(columns.into_iter()) {
-                if let Square::Busy(_) = board.map[row][column] {
+                // Let's use easier constructs for things like this:
+                if let Square::Busy(_) = chessboard.board[row][column] {
                     return Err(Box::new(MoveError::Path))
-                } else if check_checks {
-                    board.check_checks(Some([row, column]))?;
+                }
+
+                match chessboard.board_state {
+                    BoardState::Test { test_state: TestState::WithoutCheck, .. } => (),
+                    _ => chessboard.check_checks(Some([row, column]))?,
                 }
             }
 
@@ -114,9 +108,10 @@ impl Move for King {
             };
 
             // If it's not a Rook, then we return an error.
-            if let Square::Busy(piece) = &board.map[rook_position[0]][rook_position[1]] {
-                if piece.has_moved { return Err(Box::new(MoveError::Style)) }
-            } else {
+            if !PiecesList::from_board(&chessboard.board).get(chessboard.turn).par_iter().any(|(piece, position)| {
+                !piece.has_moved && *position == rook_position
+            })
+            {
                 return Err(Box::new(MoveError::Style))
             }
 
@@ -131,11 +126,18 @@ impl Move for King {
             };
 
             // Now, we write what is needed to be written: 
-            let ok = board.write_andor_check(position_start, position_end, false, false, MoveDetails::Move).unwrap();
-            let _ = board.write_andor_check(rook_position, rook_position_end, false, false, MoveDetails::Take);
-            if is_actual_move {
-                *FIFTY_MOVE_RULE.lock().unwrap() += 1;
-                THREE_REPEATS_RULE.lock().unwrap().push(*board);
+            let ok = chessboard.write_andor_check(position_start, position_end, MoveDetails::Move).unwrap();
+            let _ = chessboard.write_andor_check(rook_position, rook_position_end, MoveDetails::Take);
+
+            // Since it writes twice:
+            if chessboard.board_state == BoardState::Actual {
+                *FIFTY_MOVE_RULE.lock().unwrap() -= 1;
+
+                // We want to remove the second last one as castling takes 
+                // two moves to execute and we want the last one to represent
+                // it as the one move of castling.
+                let second_last_index = THREE_REPEATS_RULE.lock().unwrap().len();
+                let _ = THREE_REPEATS_RULE.lock().unwrap().remove(second_last_index);
             }
 
             Ok(ok)
@@ -149,13 +151,10 @@ impl Move for King {
 
 impl Move for Queen {
     fn do_move(
-        board: &mut Board, 
-        position_start: [usize; 2], 
+        chessboard: &mut ChessBoard,
+        position_start: [usize; 2],
         position_end: [usize; 2],
         _has_moved: bool,
-        check_checks: bool,
-        _check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>
     {
         let position_one_diff = position_start[0] as i16 - position_end[0] as i16;
@@ -168,9 +167,9 @@ impl Move for Queen {
         // the value when it fails the conditionals in those functions even when it's valid
         // (a Rook cannot move like a Bishop and vice versa).
         if [position_one_diff, position_two_diff].contains(&0) && position_one_diff != position_two_diff {
-            return Rook::do_move(board, position_start, position_end, _has_moved, check_checks, false, is_actual_move);
+            return Rook::do_move(chessboard, position_start, position_end, _has_moved)
         } else if position_one_diff.abs() - position_two_diff.abs() == 0 && (position_one_diff, position_two_diff) != (0, 0) {
-            return Bishop::do_move(board, position_start, position_end, _has_moved, check_checks, false, is_actual_move);
+            return Bishop::do_move(chessboard, position_start, position_end, _has_moved)
         } else {
             return Err(Box::new(MoveError::Style))
         }
@@ -179,13 +178,10 @@ impl Move for Queen {
 
 impl Move for Rook {
     fn do_move(
-        board: &mut Board, 
+        chessboard: &mut ChessBoard,
         position_start: [usize; 2], 
         position_end: [usize; 2],
         _has_moved: bool,
-        check_checks: bool,
-        _check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>
     {
         let position_one_diff = position_start[0] as i16 - position_end[0] as i16;
@@ -206,34 +202,22 @@ impl Move for Rook {
 
             // Checking for said obstructions:
             for (row, column) in rows.into_iter().zip(columns.into_iter()) {
-                if let Square::Busy(_) = board.map[row][column] {
+                if let Square::Busy(_) = chessboard.board[row][column] {
                     return Err(Box::new(MoveError::Path))
                 }
             }
 
             // Re: King.
-            let square = &board.map[position_end[0]][position_end[1]];
+            let square = &chessboard.board[position_end[0]][position_end[1]];
             if let Square::Busy(piece) = square {
-                let opposite_color = board.color.opposite();
+                let opposite_color = chessboard.turn.opposite();
                 if piece.color == opposite_color {                        
-                    let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Take)?;
-                    if is_actual_move {
-                        *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                        THREE_REPEATS_RULE.lock().unwrap().clear();
-                    }
-
-                    Ok(ok)
+                    return chessboard.write_andor_check(position_start, position_end, MoveDetails::Take)
                 } else {
                     Err(Box::new(MoveError::Take))
                 }
             } else {
-                let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Move)?;
-                if is_actual_move {
-                    *FIFTY_MOVE_RULE.lock().unwrap() += 1;
-                    THREE_REPEATS_RULE.lock().unwrap().push(*board);
-                }
-
-                Ok(ok)
+                return chessboard.write_andor_check(position_start, position_end, MoveDetails::Move)
             }
         } else {
             Err(Box::new(MoveError::Style))
@@ -243,13 +227,10 @@ impl Move for Rook {
 
 impl Move for Bishop {
     fn do_move(
-        board: &mut Board, 
+        chessboard: &mut ChessBoard,
         position_start: [usize; 2], 
         position_end: [usize; 2],
         _has_moved: bool,
-        check_checks: bool,
-        _check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>
     {
         let position_one_diff = position_start[0] as i16 - position_end[0] as i16;
@@ -267,33 +248,21 @@ impl Move for Bishop {
             };
 
             for (row, column) in rows.into_iter().zip(columns.into_iter()) {
-                if let Square::Busy(_) = board.map[row][column] {
+                if let Square::Busy(_) = chessboard.board[row][column] {
                     return Err(Box::new(MoveError::Path))
                 }
             }
 
-            let square: &Square = &board.map[position_end[0]][position_end[1]];
+            let square: &Square = &chessboard.board[position_end[0]][position_end[1]];
             if let Square::Busy(piece) = square {
-                let opposite_color = board.color.opposite();
+                let opposite_color = chessboard.turn.opposite();
                 if piece.color == opposite_color {                        
-                    let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Take)?;
-                    if is_actual_move {
-                        *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                        THREE_REPEATS_RULE.lock().unwrap().clear();
-                    }
-
-                    Ok(ok)
+                    return chessboard.write_andor_check(position_start, position_end, MoveDetails::Take)
                 } else {
                     Err(Box::new(MoveError::Take))
                 }
             } else {
-                let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Move)?;
-                if is_actual_move {
-                    *FIFTY_MOVE_RULE.lock().unwrap() += 1;
-                    THREE_REPEATS_RULE.lock().unwrap().push(*board);
-                }
-
-                Ok(ok)
+                return chessboard.write_andor_check(position_start, position_end, MoveDetails::Move)
             }
         } else {
             Err(Box::new(MoveError::Style))
@@ -303,13 +272,10 @@ impl Move for Bishop {
 
 impl Move for Knight {
     fn do_move(
-        board: &mut Board, 
+        chessboard: &mut ChessBoard,
         position_start: [usize; 2], 
         position_end: [usize; 2],
         _has_moved: bool,
-        check_checks: bool,
-        _check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>
     {
         let position_one_diff = position_start[0] as i16 - position_end[0] as i16;
@@ -318,28 +284,16 @@ impl Move for Knight {
         let p_one_p_two = [position_one_diff.abs(), position_two_diff.abs()];
         if p_one_p_two.contains(&1) && p_one_p_two.contains(&2)  {
             // Re: King.
-            let square: &Square = &board.map[position_end[0]][position_end[1]];
+            let square: &Square = &chessboard.board[position_end[0]][position_end[1]];
             if let Square::Busy(piece) = square {
-                let opposite_color = board.color.opposite();
+                let opposite_color = chessboard.turn.opposite();
                 if piece.color == opposite_color {
-                    let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Take)?;
-                    if is_actual_move {
-                        *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                        THREE_REPEATS_RULE.lock().unwrap().clear();
-                    }
-
-                    Ok(ok)
+                    return chessboard.write_andor_check(position_start, position_end, MoveDetails::Take)
                 } else {
                     Err(Box::new(MoveError::Take))
                 }
             } else {
-                let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Move)?;
-                if is_actual_move {
-                    *FIFTY_MOVE_RULE.lock().unwrap() += 1;
-                    THREE_REPEATS_RULE.lock().unwrap().push(*board);
-                }
-
-                Ok(ok)
+                return chessboard.write_andor_check(position_start, position_end, MoveDetails::Move)
             }
         } else {
             Err(Box::new(MoveError::Style))
@@ -349,54 +303,38 @@ impl Move for Knight {
 
 impl Move for Pawn {
     fn do_move(
-        board: &mut Board, 
+        chessboard: &mut ChessBoard,
         position_start: [usize; 2], 
         position_end: [usize; 2],
         has_moved: bool,
-        check_checks: bool,
-        check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>
     {
         let position_one_diff = position_start[0] as i16 - position_end[0] as i16;
         let position_two_diff = position_start[1] as i16 - position_end[1] as i16;
 
-        let one = match board.color {
+        let one = match chessboard.turn {
             Color::White => 1, 
             Color::Black => -1,
         };
 
-        let square = &board.map[position_end[0]][position_end[1]];
+        let square = &chessboard.board[position_end[0]][position_end[1]];
 
         if (position_one_diff, position_two_diff) == (one, 0) {
             // The pawn is a bit different: we don't need to check
             // for if the color is correct *here*. It moves differently.
             if let Square::Busy(_) = square { Err(Box::new(MoveError::Path)) }
             else {
-                // Pawns can also promote, which is why said flag exists.
-                let ok = board.write_andor_check(position_start, position_end, check_checks,
-                    ((board.color == Color::White && position_end[0] == 0) || (board.color == Color::Black && position_end[0] == 7)) && check_promotion,
-                    MoveDetails::Move,
-                )?;
-                if is_actual_move {
-                    *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                    THREE_REPEATS_RULE.lock().unwrap().clear();
-                }
-
-                Ok(ok)
+                // Promotion will be handled elsewhere.
+                return chessboard.write_andor_check(position_start, position_end, MoveDetails::Move)
             }
         // If the pawn hasn't moved yet, it can move twice. This is seen here:
         } else if (position_one_diff, position_two_diff) == (one * 2, 0) && !has_moved {
             if let Square::Busy(_) = square { return Err(Box::new(MoveError::Path)) }
-            else if let Square::Busy(_) = &board.map[(position_end[0] as i16 + one) as usize][position_end[1]] { return Err(Box::new(MoveError::Path)) }
+            else if let Square::Busy(_) = &chessboard.board[(position_end[0] as i16 + one) as usize][position_end[1]] { return Err(Box::new(MoveError::Path)) }
             else {
+                let ok = chessboard.write_andor_check(position_start, position_end, MoveDetails::Move)?;
                 // We need to construct an en passant square:
-                let ok = board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Move)?;
-                board.map[(position_end[0] as i16 + one) as usize][position_end[1]] = Square::EnPassant(0);
-                if is_actual_move {
-                    *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                    THREE_REPEATS_RULE.lock().unwrap().clear();
-                }
+                chessboard.board[(position_end[0] as i16 + one) as usize][position_end[1]] = Square::EnPassant(0);
 
                 Ok(ok)
             }
@@ -405,36 +343,20 @@ impl Move for Pawn {
                 // If it's Busy or an EnPassant, we take the square. For the
                 // latter, we also need to remove the piece behind it.
                 Square::Busy(piece) => {
-                    let opposite_color = board.color.opposite();
+                    let opposite_color = chessboard.turn.opposite();
                     if piece.color == opposite_color {
-                        let ok = board.write_andor_check(position_start, position_end, check_checks,
-                            ((board.color == Color::White && position_end[0] == 0) || (board.color == Color::Black && position_end[0] == 7)) && check_promotion,
-                            MoveDetails::Take,
-                        )?;
-                        if is_actual_move {
-                            *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                            THREE_REPEATS_RULE.lock().unwrap().clear();
-                        }
-
-                        Ok(ok)
+                        return chessboard.write_andor_check(position_start, position_end, MoveDetails::Take)
                     } else {
                         Err(Box::new(MoveError::Take))
                     }
                 },
                 Square::EnPassant(_) => {
-                    let to_en_passant = mem::take(&mut board.map[(position_end[0] as i16 + one) as usize][position_end[1]]);
-                    match board.write_andor_check(position_start, position_end, check_checks, false, MoveDetails::Take) {
-                        Ok(move_details) => {
-                            if is_actual_move {
-                                *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                                THREE_REPEATS_RULE.lock().unwrap().clear();
-                            }
-
-                            Ok(move_details)
-                        },
+                    let to_en_passant = mem::take(&mut chessboard.board[(position_end[0] as i16 + one) as usize][position_end[1]]);
+                    match chessboard.write_andor_check(position_start, position_end, MoveDetails::Take) {
+                        Ok(move_details) => Ok(move_details),
                         // If checking for checks then fails, we have to undo it all.
                         Err(err) => {
-                            board.map[(position_end[0] as i16 + one) as usize][position_end[1]] = to_en_passant;
+                            chessboard.board[(position_end[0] as i16 + one) as usize][position_end[1]] = to_en_passant;
                             Err(err)
                         },
                     }
@@ -469,22 +391,19 @@ pub enum PieceType {
 impl PieceType {
     pub fn do_move(
         &self,
-        board: &mut Board,
+        chessboard: &mut ChessBoard,
         position_start: [usize; 2],
         position_end: [usize; 2],
         has_moved: bool,
-        check_checks: bool,
-        check_promotion: bool,
-        is_actual_move: bool,
     ) -> Result<MoveDetails, Box<dyn BoardError>>
     {
         match self {
-            PieceType::King => King::do_move(board, position_start, position_end, has_moved, check_checks, check_promotion, is_actual_move),
-            PieceType::Queen => Queen::do_move(board, position_start, position_end, has_moved, check_checks, check_promotion, is_actual_move),
-            PieceType::Rook => Rook::do_move(board, position_start, position_end, has_moved, check_checks, check_promotion, is_actual_move),
-            PieceType::Bishop => Bishop::do_move(board, position_start, position_end, has_moved, check_checks, check_promotion, is_actual_move),
-            PieceType::Knight => Knight::do_move(board, position_start, position_end, has_moved, check_checks, check_promotion, is_actual_move),
-            PieceType::Pawn => Pawn::do_move(board, position_start, position_end, has_moved, check_checks, check_promotion, is_actual_move),
+            PieceType::King => King::do_move(chessboard, position_start, position_end, has_moved),
+            PieceType::Queen => Queen::do_move(chessboard, position_start, position_end, has_moved),
+            PieceType::Rook => Rook::do_move(chessboard, position_start, position_end, has_moved),
+            PieceType::Bishop => Bishop::do_move(chessboard, position_start, position_end, has_moved),
+            PieceType::Knight => Knight::do_move(chessboard, position_start, position_end, has_moved),
+            PieceType::Pawn => Pawn::do_move(chessboard, position_start, position_end, has_moved),
         }
     }
 }
