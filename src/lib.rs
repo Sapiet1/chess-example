@@ -270,6 +270,10 @@ impl ChessBoard {
 
     fn check_checks(&mut self, king_position: Option<[usize; 2]>) -> Result<(), Box<dyn BoardError>> {
         // Switching the states
+        // This is wrong. When inputted, it must itself be
+        // already in TestState. Thus, we can avoid turning it back
+        // over to Actual here.
+        let board_state = self.board_state;
         self.to_board_state_test(TestState::WithoutCheck);
 
         let king_position = {
@@ -289,7 +293,7 @@ impl ChessBoard {
             }
         };
 
-        // The return value is stored here:
+        // The return value is stored here
         let mut out: Result<(), Box<dyn BoardError>> = Ok(());
         if let Err(check_error) = PiecesList::from_board(&self.board).get(self.turn.opposite()).par_iter().try_for_each(|(piece, position)| {
             let mut board = *self;
@@ -309,7 +313,7 @@ impl ChessBoard {
             out = Err(check_error);
         }
 
-        self.to_board_state_actual();
+        self.board_state = board_state;
         out
 
     }
@@ -347,14 +351,16 @@ impl ChessBoard {
             }
         }
 
-        match move_details {
-            MoveDetails::Move if our_piece.get().piece_type != PieceType::Pawn => {
-                *FIFTY_MOVE_RULE.lock().unwrap() += 1;
-                THREE_REPEATS_RULE.lock().unwrap().push(self.board);
-            },
-            _ => {
-                *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                THREE_REPEATS_RULE.lock().unwrap().clear();
+        if self.board_state == BoardState::Actual {
+            match move_details {
+                MoveDetails::Move if our_piece.get().piece_type != PieceType::Pawn => {
+                    *FIFTY_MOVE_RULE.lock().unwrap() += 1;
+                    THREE_REPEATS_RULE.lock().unwrap().push(self.board);
+                },
+                _ => {
+                    *FIFTY_MOVE_RULE.lock().unwrap() = 0;
+                    THREE_REPEATS_RULE.lock().unwrap().clear();
+                }
             }
         }
 

@@ -121,16 +121,17 @@ impl Move for King {
 
             // Now, we write what is needed to be written: 
             let ok = chessboard.write_andor_check(position_start, position_end, MoveDetails::Move).unwrap();
-            let _ = chessboard.write_andor_check(rook_position, rook_position_end, MoveDetails::Take);
+            let _ = chessboard.write_andor_check(rook_position, rook_position_end, MoveDetails::Move);
 
             // Since it writes twice:
             if chessboard.board_state == BoardState::Actual {
+                // Something is wrong. Check lib for check_over and check_checks.
                 *FIFTY_MOVE_RULE.lock().unwrap() -= 1;
 
                 // We want to remove the second last one as castling takes 
                 // two moves to execute and we want the last one to represent
                 // it as the one move of castling.
-                let second_last_index = THREE_REPEATS_RULE.lock().unwrap().len();
+                let second_last_index = THREE_REPEATS_RULE.lock().unwrap().len() - 2;
                 let _ = THREE_REPEATS_RULE.lock().unwrap().remove(second_last_index);
             }
 
