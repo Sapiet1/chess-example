@@ -270,6 +270,9 @@ impl ChessBoard {
 
     fn check_checks(&mut self, king_position: Option<[usize; 2]>) -> Result<(), Box<dyn BoardError>> {
         // Switching the states
+        // This is wrong. When inputted, it must itself be
+        // already in TestState. Thus, we can avoid turning it back
+        // over to Actual here.
         let board_state = self.board_state;
         self.to_board_state_test(TestState::WithoutCheck);
 
@@ -310,7 +313,12 @@ impl ChessBoard {
             out = Err(check_error);
         }
 
-        self.board_state = board_state;
+        if board_state == BoardState::Actual {
+            self.to_board_state_actual();
+        } else {
+            self.board_state = board_state;
+        }
+
         out
 
     }
