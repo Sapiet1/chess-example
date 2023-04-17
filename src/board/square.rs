@@ -1,4 +1,6 @@
 use super::movable::PieceType;
+use crate::{board:: Board, BOARD_DIMENSION};
+use rayon::prelude::*;
 
 use std::process; 
 
@@ -43,6 +45,59 @@ pub struct Piece {
     pub color: Color,
     pub has_moved: bool,
     pub piece_type: PieceType,
+}
+
+
+pub struct PiecesList {
+    white_pieces: Vec<(Piece, [usize; 2])>,
+    black_pieces: Vec<(Piece, [usize; 2])>,
+}
+
+impl PiecesList {
+    pub fn new() -> Self {
+        let white_pieces = Vec::new();
+        let black_pieces = Vec::new();
+        
+        PiecesList { white_pieces, black_pieces }
+    }
+    
+    pub fn get_mut(&mut self, color: Color) -> &mut Vec<(Piece, [usize; 2])> {
+        match color {
+            Color::White => &mut self.white_pieces,
+            Color::Black => &mut self.black_pieces,
+        }
+    }
+
+    pub fn get(&self, color: Color) -> &Vec<(Piece, [usize; 2])> {
+        match color {
+            Color::White => &self.white_pieces,
+            Color::Black => &self.black_pieces,
+        }
+    }
+
+    pub fn from_board(board: &Board) -> Self {
+        let pieces = board.par_iter().enumerate().fold(|| PiecesList::new(), |mut pieces, (index, square)| {
+            let &Square::Busy(piece) = square else {
+                return pieces
+            };
+
+            let row = index / BOARD_DIMENSION;
+            let column = index % BOARD_DIMENSION;
+
+            pieces.get_mut(piece.color).push((piece, [row, column]));
+
+            pieces
+        })
+        .reduce(|| PiecesList::new(), |mut pieces_out, pieces| {
+            pieces_out.white_pieces.extend(pieces.white_pieces);
+            pieces_out.black_pieces.extend(pieces.black_pieces);
+
+            pieces_out
+        });
+
+
+        pieces
+    }
 }
 
 // The Square. It has three variants,

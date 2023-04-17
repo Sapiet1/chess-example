@@ -9,7 +9,7 @@ use errors::{CheckError, BoardError};
 pub use errors::{ErrorID, MoveError};
 mod board;
 use board::{Board, BOARD_DIMENSION};
-use board::square::{Square, Color, Piece};
+use board::square::{Square, Color, /* Piece, */PiecesList};
 use board::movable::{MoveDetails, PieceType};
 
 // The fifty move rule states that if there's no 
@@ -29,59 +29,6 @@ pub struct ChessBoard {
     board: Board,
     turn: Color,
     board_state: BoardState,
-}
-
-// Complementary to chessboard.
-struct PiecesList {
-    white_pieces: Vec<(Piece, [usize; 2])>,
-    black_pieces: Vec<(Piece, [usize; 2])>,
-}
-
-impl PiecesList {
-    fn new() -> Self {
-        let white_pieces = Vec::new();
-        let black_pieces = Vec::new();
-        
-        PiecesList { white_pieces, black_pieces }
-    }
-    
-    fn get_mut(&mut self, color: Color) -> &mut Vec<(Piece, [usize; 2])> {
-        match color {
-            Color::White => &mut self.white_pieces,
-            Color::Black => &mut self.black_pieces,
-        }
-    }
-
-    fn get(&self, color: Color) -> &Vec<(Piece, [usize; 2])> {
-        match color {
-            Color::White => &self.white_pieces,
-            Color::Black => &self.black_pieces,
-        }
-    }
-
-    fn from_board(board: &Board) -> Self {
-        let pieces = board.par_iter().enumerate().fold(|| PiecesList::new(), |mut pieces, (index, square)| {
-            let &Square::Busy(piece) = square else {
-                return pieces
-            };
-
-            let row = index / BOARD_DIMENSION;
-            let column = index % BOARD_DIMENSION;
-
-            pieces.get_mut(piece.color).push((piece, [row, column]));
-
-            pieces
-        })
-        .reduce(|| PiecesList::new(), |mut pieces_out, pieces| {
-            pieces_out.white_pieces.extend(pieces.white_pieces);
-            pieces_out.black_pieces.extend(pieces.black_pieces);
-
-            pieces_out
-        });
-
-
-        pieces
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -468,7 +415,7 @@ impl ChessBoard {
         let repeat_count = THREE_REPEATS_RULE.lock().unwrap().iter().filter(|board| {
             !for_repeats_rule.insert(**board)
         })
-        .count() + 1;        
+        .count();
 
         let impossible_to_win = count.into_iter().all(|x| x <= 2);
 
