@@ -1,7 +1,5 @@
-use std::{iter, process, fmt, io, mem, sync::Mutex, collections::{HashMap, HashSet}};
-// Rayon is a multi-threading lib:
+use std::{iter, process, fmt, io, mem, sync::Mutex, sync::atomic::{AtomicU8, Ordering}, collections::{HashMap, HashSet}};
 use rayon::prelude::*;
-// A Lazy cell for global static:
 use once_cell::sync::Lazy;
 
 mod errors;
@@ -15,7 +13,7 @@ use board::movable::{MoveDetails, PieceType};
 // The fifty move rule states that if there's no 
 // captures or pawn moves in fifty moves, 
 // the game will be a draw.  
-static FIFTY_MOVE_RULE: Lazy<Mutex<u8>> = Lazy::new(|| Mutex::new(0));
+static FIFTY_MOVE_RULE: AtomicU8 = AtomicU8::new(0);
 const FIFTY_MOVES: u8 = 50;
 // If the board repeats thrice, it's a draw. 
 // We can simply clear the vector whenever
@@ -24,14 +22,14 @@ const FIFTY_MOVES: u8 = 50;
 static THREE_REPEATS_RULE: Lazy<Mutex<Vec<Board>>> = Lazy::new(|| Mutex::new(Vec::new()));
 const THREE_REPEATS: usize = 3;
 
-#[derive(Copy, Clone)]
+#[derive(Clone, Copy)]
 pub struct ChessBoard {
     board: Board,
     turn: Color,
     board_state: BoardState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BoardState {
     Actual,
     Test {
@@ -40,7 +38,7 @@ enum BoardState {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TestState {
     WithCheck,
     WithoutCheck,
@@ -120,11 +118,14 @@ impl ChessBoard {
             .flatten()
             .collect::<Vec<_>>()
             .try_into().unwrap();
+
+        // Adding the first board to the three repeats:
         THREE_REPEATS_RULE.lock().unwrap().push(board);
 
         // White goes first:
         let turn = Color::White;
-        // First move, so:
+
+        // Board is usually "Actual":
         let board_state = BoardState::Actual; 
 
         ChessBoard { board, turn, board_state }
@@ -194,7 +195,6 @@ impl ChessBoard {
         Ok(self.end_move())
     }
 
-    // Should pieces be put here? Or should I move this over?
     fn do_move(&mut self, position_start: [usize; 2], position_end: [usize; 2]) -> Result<(), Box<dyn BoardError>> {
         let square = &self.board[position_start[0]][position_start[1]];
         // The square has to be a piece for it to be moved.
@@ -205,11 +205,11 @@ impl ChessBoard {
         // turn the board says it is.
         if piece.color != self.turn { return Err(Box::new(MoveError::Color)) }
 
-        // Appeases the borrow checker for PieceType implements copy.
+        // To get pass the borrow checker:
         let piece_type = piece.piece_type;
         // The result of do_move for PieceType is an enum with fields
         // Move and Take, and are not to be used unless
-        // checking for checks. Thus, you can throw it away.
+        // checking for checks. Thus, it can be thrown away.
         let _ = piece_type.do_move(self, position_start, position_end, piece.has_moved)?;
 
         Ok(())
@@ -217,9 +217,6 @@ impl ChessBoard {
 
     fn check_checks(&mut self, king_position: Option<[usize; 2]>) -> Result<(), Box<dyn BoardError>> {
         // Switching the states
-        // This is wrong. When inputted, it must itself be
-        // already in TestState. Thus, we can avoid turning it back
-        // over to Actual here.
         let board_state = self.board_state;
         self.to_board_state_test(TestState::WithoutCheck);
 
@@ -254,7 +251,7 @@ impl ChessBoard {
             Ok(())
         })
         {
-            // Basically, checks for if you can capture
+            // Checks for if you can capture
             // the dummy value or the king. If you can,
             // you throw an error (a check error).
             out = Err(check_error);
@@ -270,7 +267,7 @@ impl ChessBoard {
 
     }
 
-    // For the movable.rs file. Basically, we
+    // For the movable.rs file. We
     // write the piece to the location and
     // if it fails the part where we check
     // for checks (optional), we undo
@@ -284,38 +281,85 @@ impl ChessBoard {
     {
         let our_piece_original = mem::take(&mut self.board[position_start[0]][position_start[1]]);
         let mut our_piece = our_piece_original;
-        // Promotion will be handled at the end of the turn
-        // when board_state is BoardState::Actual.
         let their_piece = mem::take(&mut self.board[position_end[0]][position_end[1]]);
         our_piece.set_moved();
 
+        // Undoing the writing to the board. Takes a Board
+        // instead of a full ChessBoard because of borrow checker.
+        let write_incorrect = |board: &mut Board| {
+            board[position_start[0]][position_start[1]] = our_piece_original;
+            board[position_end[0]][position_end[1]] = their_piece;  
+        };
+
+        // Code for promotion. Is placed here
+        // to redo the move if the input fails:
+        let final_row = match self.turn {
+            Color::White => 0,
+            Color::Black => 7,
+        };
+        if let Square::Busy(piece) = &mut our_piece {
+            if piece.piece_type == PieceType::Pawn && position_end[0] == final_row && self.board_state == BoardState::Actual {
+                let piece_type = take_input(
+                    Some(
+                        "The pawn is being promoted to...\n\
+                         Choose:\n\
+                         [Q]ueen\n\
+                         [R]ook\n\
+                         [B]ishop\n\
+                         [K][N]ight\n"
+                    ), 
+                    true,
+                );
+
+                let possible_pieces = ["q", "r", "b", "k", "n"];
+                if possible_pieces.contains(&piece_type.as_ref()) {
+                    piece.piece_type = match piece_type.as_ref() {
+                        "q" => PieceType::Queen,
+                        "r" => PieceType::Rook,
+                        "b" => PieceType::Bishop,
+                        "k" | "n" => PieceType::Knight,
+                        _ => process::exit(1)
+                    };
+                } else {
+                    write_incorrect(&mut self.board);
+                    return Err(Box::new(MoveError::Syntax))
+                }
+            }
+        }
+
         self.board[position_end[0]][position_end[1]] = our_piece;
 
+        // Then checking for checks if requested:
         match self.board_state {
             BoardState::Test { test_state: TestState::WithoutCheck, .. } => (),
-            _ => {
+            BoardState::Test { .. }  => {
                 if let Err(check_error) = self.check_checks(None) {
-                    self.board[position_start[0]][position_start[1]] = our_piece_original;
-                    self.board[position_end[0]][position_end[1]] = their_piece;
+                    write_incorrect(&mut self.board);
 
                     return Err(check_error)
                 }
-            }
-        }
-
-        if self.board_state == BoardState::Actual {
-            match move_details {
-                MoveDetails::Move if our_piece.get().piece_type != PieceType::Pawn => {
-                    *FIFTY_MOVE_RULE.lock().unwrap() += 1;
-                    THREE_REPEATS_RULE.lock().unwrap().push(self.board);
-                },
-                _ => {
-                    *FIFTY_MOVE_RULE.lock().unwrap() = 0;
-                    THREE_REPEATS_RULE.lock().unwrap().clear();
+            },
+            BoardState::Actual => {
+                if let Err(check_error) = self.check_checks(None) {
+                    write_incorrect(&mut self.board);
+                                       
+                    match move_details {
+                        MoveDetails::Move if our_piece.get().piece_type != PieceType::Pawn => {
+                            FIFTY_MOVE_RULE.fetch_add(1, Ordering::SeqCst);
+                            THREE_REPEATS_RULE.lock().unwrap().push(self.board);
+                        },
+                        _ => {
+                            FIFTY_MOVE_RULE.store(0, Ordering::SeqCst);
+                            THREE_REPEATS_RULE.lock().unwrap().clear();
+                        }
+                    }
+                    
+                    return Err(check_error)
                 }
-            }
+            },
         }
 
+        // Returning the MoveDetails enum.
         Ok(move_details)
     }
 
@@ -331,11 +375,11 @@ impl ChessBoard {
         });
 
         // Checking for if there's stalemate or checkmate:
-        let result = self.check_over();
+        let out = self.check_over();
         // Switching the board's color.
         self.turn = self.turn.opposite();
 
-        result
+        out
     }
 
     // This checks for stalemates and checkmates.
@@ -343,14 +387,11 @@ impl ChessBoard {
         // We want the opposite color to check if they are able to move
         // after our move.
         let opposite_color = self.turn.opposite();
-        // The state of the board.
+        // The state of the board being prepared for testing.
         self.to_board_state_test(TestState::WithCheck);
         
         let (all_moves, count) = PiecesList::from_board(&self.board).get(opposite_color).par_iter()
-        // Then collecting all of the results from the test moves
-        // of every square on the board for each piece. At most, 
-        // it's 16*64, which is only 1024. This program is
-        // multi-threaded, which may help slowdowns.
+        // Collecting the necessary information:
         .fold(|| (Vec::new(), [0; 2]), |(mut collector, mut count), (piece, position_start)| {
             // Counter for the king, bishop, and knights. If it's two,
             // then it's a draw.
@@ -402,7 +443,7 @@ impl ChessBoard {
             true
         });
 
-        // Now, we check for if it there's any checks:
+        // Now, we check for if there were any checks:
         let has_check_error = all_moves.into_par_iter().any(|result| {
             if let Err(error_details) = result {
                 return error_details.id() == ErrorID::Check
@@ -411,12 +452,14 @@ impl ChessBoard {
             false
         });
 
+        // Checking for repeated states in the board:
         let mut for_repeats_rule: HashSet<Board> = HashSet::new();
         let repeat_count = THREE_REPEATS_RULE.lock().unwrap().iter().filter(|board| {
             !for_repeats_rule.insert(**board)
         })
         .count();
 
+        // I.e., if there was only a king and a bishop/knight for both sides.
         let impossible_to_win = count.into_iter().all(|x| x <= 2);
 
         // If it's game over and has a check error, it has
@@ -425,7 +468,7 @@ impl ChessBoard {
         if is_game_over && has_check_error {
             // We return the color of the winner.
             GameStatus::End(self.turn)
-        } else if is_game_over || *FIFTY_MOVE_RULE.lock().unwrap() == FIFTY_MOVES || repeat_count == THREE_REPEATS || impossible_to_win {
+        } else if is_game_over || FIFTY_MOVE_RULE.load(Ordering::SeqCst) == FIFTY_MOVES || repeat_count == THREE_REPEATS || impossible_to_win {
             // Fifty move rule and three repitition is also considered draw.
             GameStatus::Stalemate
         } else {
@@ -434,13 +477,13 @@ impl ChessBoard {
     }
 }
 
-// Giving Board a way to be printed:
+// Giving ChessBoard (or in reality Board) a way to be printed:
 impl fmt::Display for ChessBoard {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let board_str = format!("_________________________________________________________\n\
-                                          |      |      |      |      |      |      |      |      |\
-                                          \n{}\n\
-                                          |______|______|______|______|______|______|______|______|", 
+                                 |      |      |      |      |      |      |      |      |\
+                                 \n{}\n\
+                                 |______|______|______|______|______|______|______|______|", 
             // We collect each piece into a string here:
             self.board.par_iter().enumerate().fold(|| String::new(), |collector, (index, square)| {
                 let piece_str = {

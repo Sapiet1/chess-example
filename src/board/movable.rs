@@ -1,4 +1,4 @@
-use std::{iter, mem};
+use std::{iter, mem, sync::atomic::Ordering};
 use rayon::prelude::*;
 
 use crate::{ChessBoard, FIFTY_MOVE_RULE, THREE_REPEATS_RULE, TestState, BoardState, PiecesList};
@@ -59,10 +59,10 @@ impl Move for King {
         // Castling requires the King hasn't moved:
         } else if position_two_diff.abs() == 2 && position_one_diff == 0 && !has_moved {
             // We're constructing an iterator to check for
-            // if we're trying to castle. 
+            // when we're castling.
             let rows = {
                 // We know for sure that there's going to be at most 8
-                // columns in the columns iterator (actually 2, but this works).
+                // columns in the columns iterator.
                 iter::repeat(position_start[0]).take(BOARD_DIMENSION).collect::<Vec<_>>()
             };
             let columns = {
@@ -78,9 +78,7 @@ impl Move for King {
             // Unlike with other moves, we're checking for checks from
             // within the move function itself. This is because
             // there are multiple squares we need to check, not just one. 
-            // It's more simple. This also checks for path obstructions.
             for (row, column) in rows.into_iter().zip(columns.into_iter()) {
-                // May use PiecesList for above. TO-DO.
                 if let Square::Busy(_) = chessboard.board[row][column] {
                     return Err(Box::new(MoveError::Path))
                 }
@@ -125,11 +123,9 @@ impl Move for King {
 
             // Since it writes twice:
             if chessboard.board_state == BoardState::Actual {
-                *FIFTY_MOVE_RULE.lock().unwrap() -= 1;
+                FIFTY_MOVE_RULE.fetch_sub(1, Ordering::SeqCst);
 
-                // We want to remove the second last one as castling takes 
-                // two moves to execute and we want the last one to represent
-                // it as the one move of castling.
+                // We want the last of the two moves to represent the move:
                 let second_last_index = THREE_REPEATS_RULE.lock().unwrap().len() - 2;
                 let _ = THREE_REPEATS_RULE.lock().unwrap().remove(second_last_index);
             }
@@ -137,7 +133,7 @@ impl Move for King {
             Ok(ok)
         } else {
             // If you fail the move conditions for the piece, 
-            // it's an immediate error.
+            // it will throw an error:
             Err(Box::new(MoveError::Style))
         }
     }
@@ -308,11 +304,8 @@ impl Move for Pawn {
         let square = &chessboard.board[position_end[0]][position_end[1]];
 
         if (position_one_diff, position_two_diff) == (one, 0) {
-            // The pawn is a bit different: we don't need to check
-            // for if the color is correct *here*. It moves differently.
             if let Square::Busy(_) = square { Err(Box::new(MoveError::Path)) }
             else {
-                // Promotion will be handled elsewhere.
                 return chessboard.write_andor_check(position_start, position_end, MoveDetails::Move)
             }
         // If the pawn hasn't moved yet, it can move twice. This is seen here:
@@ -342,7 +335,7 @@ impl Move for Pawn {
                     let to_en_passant = mem::take(&mut chessboard.board[(position_end[0] as i16 + one) as usize][position_end[1]]);
                     match chessboard.write_andor_check(position_start, position_end, MoveDetails::Take) {
                         Ok(move_details) => Ok(move_details),
-                        // If checking for checks then fails, we have to undo it all.
+                        // If checking for checks then fails, we need to manually undo it.
                         Err(err) => {
                             chessboard.board[(position_end[0] as i16 + one) as usize][position_end[1]] = to_en_passant;
                             Err(err)
@@ -357,14 +350,7 @@ impl Move for Pawn {
     }
 }
 
-// Trait objects are difficult to work with
-// and are extremely limiting (can't look inside value).
-// Generics indicate that Square itself must use
-// a generic, which means it can't be held
-// with pieces of different types. Thus, I
-// use an enum. We don't use structs within the
-// the enum itself because we can already
-// implement the logic here.
+// How to interact with the piece types:
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum PieceType {
     King,
@@ -396,8 +382,7 @@ impl PieceType {
     }
 }
 
-// The MoveDetails is particularly helpful
-// when checking for checks.
+// For checking checks:
 #[derive(Debug)]
 pub enum MoveDetails {
     Move,

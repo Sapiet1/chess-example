@@ -37,9 +37,7 @@ impl Color {
 
 // Here, we create a Piece type.
 // It has a color, a boolean for
-// if it has moved yet, a piece_type,
-// and a way to test if it's a dummy
-// for the check_checks method in Board.
+// if it has moved yet, and a piece_type.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Piece {
     pub color: Color,
@@ -133,8 +131,7 @@ impl Square {
     }
 
     // Here, we set the piece to has_moved if it is one.
-    // Otherwise, we exit the program entirely.
-    // As you can do square.get_mut().has_moved = true, this is DEPRECATED:
+    // This isn't needed anymore as get_mut() exists.
     pub fn set_moved(&mut self) {
         let Square::Busy(piece) = self else {
             process::exit(1)
